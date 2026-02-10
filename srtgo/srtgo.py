@@ -1,11 +1,11 @@
 try:
-    from curl_cffi.requests.exceptions import ConnectionError
+    from curl_cffi.requests.exceptions import ConnectionError, Timeout  # Timeout 추가
 except ImportError:
-    from requests.exceptions import ConnectionError
+    from requests.exceptions import ConnectionError, Timeout  # Timeout 추가
 
 from datetime import datetime, timedelta
 from json.decoder import JSONDecodeError
-from random import gammavariate
+from random import gammavariate, randint, uniform
 from termcolor import colored
 from typing import Awaitable, Callable, List, Optional, Tuple, Union
 
@@ -118,9 +118,13 @@ DEFAULT_STATIONS = {
 }
 
 # 예약 간격 (평균 간격 (초) = SHAPE * SCALE): gamma distribution (1.25 +/- 0.25 s)
-RESERVE_INTERVAL_SHAPE = 4
-RESERVE_INTERVAL_SCALE = 0.25
-RESERVE_INTERVAL_MIN = 0.25
+# RESERVE_INTERVAL_SHAPE = 4
+# RESERVE_INTERVAL_SCALE = 0.25
+# RESERVE_INTERVAL_MIN = 0.25
+
+RESERVE_INTERVAL_SHAPE = 5
+RESERVE_INTERVAL_SCALE = 0.5
+RESERVE_INTERVAL_MIN = 1.0
 
 WAITING_BAR = ["|", "/", "-", "\\"]
 
@@ -480,19 +484,13 @@ def reserve(rail_type="SRT", debug=False):
     stations, station_key = get_station(rail_type)
     options = get_options()
 
-    # Calculate dynamic booking window (SRT: D-30, KTX: D-31; both open at 07:00)
-    if is_srt:
-        max_days = 30 if now.hour >= 7 else 29
-    else:
-        max_days = 31 if now.hour >= 7 else 30
-
-    # Generate date choices within the window
+    # Generate date and time choices
     date_choices = [
         (
             (now + timedelta(days=i)).strftime("%Y/%m/%d %a"),
             (now + timedelta(days=i)).strftime("%Y%m%d"),
         )
-        for i in range(max_days + 1)
+        for i in range(28)
     ]
     time_choices = [(f"{h:02d}", f"{h:02d}0000") for h in range(24)]
 
@@ -714,7 +712,7 @@ def reserve(rail_type="SRT", debug=False):
                 if _is_seat_available(trains[i], options["type"], rail_type):
                     _reserve(trains[i])
                     return
-            _sleep()
+            _sleep(i_try)
 
         except SRTError as ex:
             msg = ex.msg
@@ -745,7 +743,7 @@ def reserve(rail_type="SRT", debug=False):
             ):
                 if not _handle_error(ex):
                     return
-            _sleep()
+            _sleep(i_try)
 
         except KorailError as ex:
             msg = ex.msg
@@ -759,14 +757,14 @@ def reserve(rail_type="SRT", debug=False):
             ):
                 if not _handle_error(ex):
                     return
-            _sleep()
+            _sleep(i_try)
 
         except JSONDecodeError as ex:
             if debug:
                 print(
                     f"\nException: {ex}\nType: {type(ex)}\nArgs: {ex.args}\nMessage: {ex.msg}"
                 )
-            _sleep()
+            _sleep(i_try)
             rail = login(rail_type, debug=debug)
 
         except ConnectionError as ex:
@@ -774,6 +772,13 @@ def reserve(rail_type="SRT", debug=False):
                 return
             rail = login(rail_type, debug=debug)
 
+        except Timeout as ex:
+            print(colored(f"\n[!] 서버 응답 지연(Timeout). 5초 후 재시도합니다...", "yellow"))
+            time.sleep(5)  # 5초 대기
+            # 필요하다면 여기서 재로그인을 시도할 수도 있습니다.
+            # rail = login(rail_type, debug=debug) 
+            continue
+        
         except Exception as ex:
             if debug:
                 print("\nUndefined exception")
@@ -782,12 +787,18 @@ def reserve(rail_type="SRT", debug=False):
             rail = login(rail_type, debug=debug)
 
 
-def _sleep():
-    time.sleep(
-        gammavariate(RESERVE_INTERVAL_SHAPE, RESERVE_INTERVAL_SCALE)
-        + RESERVE_INTERVAL_MIN
-    )
+def _sleep(cnt=0):  # 인자 추가
+    # 1. 기본 대기 시간
+    wait_time = gammavariate(RESERVE_INTERVAL_SHAPE, RESERVE_INTERVAL_SCALE) + RESERVE_INTERVAL_MIN
+    
+    # 2. 봇 탐지 회피를 위한 "불규칙한 휴식" 추가
+    # 15~25회 시도마다 한 번씩 2~5초 추가 대기
+    if cnt > 0 and cnt % randint(15, 25) == 0:
+        extra_sleep = uniform(2.0, 5.0)
+        wait_time += extra_sleep
+        # print(colored(f"\n[..] 봇 탐지 회피를 위해 {extra_sleep:.1f}초 추가 대기...", "yellow")) # 디버그용
 
+    time.sleep(wait_time)
 
 def _handle_error(ex, msg=None):
     msg = (
